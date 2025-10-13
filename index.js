@@ -2,25 +2,55 @@ import 'dotenv/config';
 import {
   Client, GatewayIntentBits, Partials,
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle,
-  StringSelectMenuBuilder, InteractionType
+  StringSelectMenuBuilder, InteractionType, SlashCommandBuilder, REST, Routes
 } from 'discord.js';
-import { TOKEN, JOBS_PAGE_SIZE, CATEGORIES, SPECIALTIES, ADMIN_CHANNEL_ID, TICKET_DM } from './config.js';
+import { TOKEN, JOBS_PAGE_SIZE, CATEGORIES, SPECIALTIES, ADMIN_CHANNEL_ID, TICKET_DM, CLIENT_ID, GUILD_ID } from './config.js';
 import {
   upsertUser, getUserByDiscord, setUserVerification, createJob, listOpenJobs, countOpenJobs,
   getJobByNumber, assignJob, setJobStatus, getJobFull, addReview, refreshUserAverages,
-  getUserById, setJobPorter, incrementCompletedJobs
+  getUserById, setJobPorter, incrementCompletedJobs, updateUserType, updateUserBio, deleteUser
 } from './db.js';
 import { rsiBioHasCode } from './rsi.js';
 import { nanoid } from 'nanoid';
-import { pageControls, categorySelect, twoButtons, infoEmbed, porterOnlyEmbed } from './utils.js';
+import { pageControls, twoButtons, infoEmbed, porterOnlyEmbed } from './utils.js';
+
+/**
+ * FULL REWRITE NOTES
+ * - Allows BOTH Porters and Customers to post jobs (restriction removed).
+ * - Adds /deleteprofile (only Discord ID 1395110823898255442 may execute).
+ * - Profile view shows owner-only buttons in ONE message:
+ *     - Switch role (shows only the option they AREN'T already)
+ *     - Edit bio (modal)
+ * - Adds /editprofile to open the same modal via command.
+ * - Keeps original jobs listing, view job, take job, acceptance, dispute, completion, and rating flow.
+ *
+ * DB EXPECTATIONS (SQLite via ./db.js):
+ * - updateUserType({ discordId, userType })
+ * - updateUserBio({ discordId, bio })
+ * - deleteUser({ discordId })
+ * If your db.js doesn't have these yet, add thin wrappers there to run the SQL.
+ */
+
+const OWNER_ID = '1395110823898255442';
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.DirectMessages],
   partials: [Partials.Channel]
 });
 
-// ---- Helpers ----
-function roleRow() {
+// ---------------- UI HELPERS ----------------
+function roleSwitchRow(currentRole) {
+  const row = new ActionRowBuilder();
+  if (currentRole === 'PORTER') {
+    row.addComponents(new ButtonBuilder().setCustomId('profile:switch:CUSTOMER').setStyle(ButtonStyle.Primary).setLabel('Switch to Customer'));
+  } else if (currentRole === 'CUSTOMER') {
+    row.addComponents(new ButtonBuilder().setCustomId('profile:switch:PORTER').setStyle(ButtonStyle.Success).setLabel('Switch to Porter'));
+  }
+  row.addComponents(new ButtonBuilder().setCustomId('profile:editbio').setStyle(ButtonStyle.Secondary).setLabel('Edit Bio'));
+  return row;
+}
+
+function signupRoleRow() {
   const porter = new ButtonBuilder().setCustomId('signup:role:PORTER').setStyle(ButtonStyle.Success).setLabel('Porter');
   const customer = new ButtonBuilder().setCustomId('signup:role:CUSTOMER').setStyle(ButtonStyle.Primary).setLabel('Customer');
   return new ActionRowBuilder().addComponents(porter, customer);
@@ -34,16 +64,21 @@ function yesNoRow(base) {
 
 function signupModal(isPorter) {
   const modal = new ModalBuilder().setCustomId(`signup:modal:${isPorter ? 'PORTER' : 'CUSTOMER'}`).setTitle('Sign Up');
-
   const rsi = new TextInputBuilder().setCustomId('rsi').setLabel('RSI Handle').setStyle(TextInputStyle.Short).setRequired(isPorter);
   const bio = new TextInputBuilder().setCustomId('bio').setLabel('Bio (short)').setStyle(TextInputStyle.Paragraph).setRequired(false);
   const lang = new TextInputBuilder().setCustomId('lang').setLabel('Primary Language').setStyle(TextInputStyle.Short).setRequired(false);
-
   modal.addComponents(
     new ActionRowBuilder().addComponents(rsi),
     new ActionRowBuilder().addComponents(bio),
     new ActionRowBuilder().addComponents(lang)
   );
+  return modal;
+}
+
+function editProfileModal() {
+  const modal = new ModalBuilder().setCustomId('profile:modal:edit').setTitle('Edit Profile');
+  const bio = new TextInputBuilder().setCustomId('bio').setLabel('Bio (short)').setStyle(TextInputStyle.Paragraph).setRequired(false);
+  modal.addComponents(new ActionRowBuilder().addComponents(bio));
   return modal;
 }
 
@@ -61,7 +96,6 @@ function postJobModal(category) {
   const pay = new TextInputBuilder().setCustomId('pay').setLabel('Payment (aUEC)').setStyle(TextInputStyle.Short).setRequired(true);
   const desc = new TextInputBuilder().setCustomId('desc').setLabel('Job Description').setStyle(TextInputStyle.Paragraph).setRequired(true);
   const date = new TextInputBuilder().setCustomId('date').setLabel('Date Needed').setStyle(TextInputStyle.Short).setRequired(false);
-
   modal.addComponents(
     new ActionRowBuilder().addComponents(loc),
     new ActionRowBuilder().addComponents(pay),
@@ -95,37 +129,66 @@ async function dmOrReply(ix, content, embeds, components) {
   }
 }
 
-// ---- Ready ----
-client.once('ready', () => {
+// ---------------- COMMAND REGISTRATION ----------------
+const commands = [
+  new SlashCommandBuilder().setName('signup').setDescription('Register or update your profile.'),
+  new SlashCommandBuilder().setName('postjob').setDescription('Post a new job (Porter or Customer).'),
+  new SlashCommandBuilder().setName('jobs').setDescription('List open jobs.'),
+  new SlashCommandBuilder().setName('viewjob').setDescription('View a job by number.').addStringOption(o => o.setName('jobnumber').setDescription('Job number (e.g., JOB-1234)').setRequired(true)),
+  new SlashCommandBuilder().setName('profile').setDescription('View a profile.').addUserOption(o => o.setName('user').setDescription('User to view')),
+  new SlashCommandBuilder().setName('editprofile').setDescription('Open the Edit Profile modal.'),
+  new SlashCommandBuilder().setName('deleteprofile').setDescription('Delete a user profile (Owner only).').addUserOption(o => o.setName('user').setDescription('User to delete').setRequired(true)),
+  new SlashCommandBuilder().setName('topporters').setDescription('Show top porters (coming soon).')
+].map(c => c.toJSON());
+
+async function registerCommands() {
+  if (!CLIENT_ID) return;
+  try {
+    const rest = new REST({ version: '10' }).setToken(TOKEN);
+    if (GUILD_ID) {
+      await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+    } else {
+      await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    }
+    console.log('✅ Slash commands registered');
+  } catch (e) {
+    console.error('Failed to register commands', e);
+  }
+}
+
+// ---------------- READY ----------------
+client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
+  await registerCommands();
 });
 
-// ---- Interactions ----
+// ---------------- INTERACTIONS ----------------
 client.on('interactionCreate', async (ix) => {
   try {
-    // Slash commands
+    // Slash Commands
     if (ix.isChatInputCommand()) {
+      // /signup
       if (ix.commandName === 'signup') {
         const existing = getUserByDiscord(ix.user.id);
         await ix.reply({
           content: existing
             ? `You’re already registered as **${existing.user_type}**. Re-running signup will update your info.`
             : `Welcome to PortHub! Choose your role:`,
-          components: [roleRow()],
+          components: [signupRoleRow()],
           ephemeral: true
         });
       }
 
+      // /postjob (now allowed for PORTER or CUSTOMER)
       if (ix.commandName === 'postjob') {
         const u = getUserByDiscord(ix.user.id);
-        if (!u || u.user_type !== 'CUSTOMER') {
-          return ix.reply({ content: 'Only **Customers** can post jobs. Use `/signup` to register as a Customer.', ephemeral: true });
+        if (!u) {
+          return ix.reply({ content: 'Register first with `/signup`.', ephemeral: true });
         }
         await ix.reply({
           content: 'Select a category for your job:',
           components: [new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder()
-              .setCustomId('postjob:category')
+            new StringSelectMenuBuilder().setCustomId('postjob:category')
               .setPlaceholder('Pick a category')
               .addOptions(CATEGORIES.map(c => ({ label: c, value: c })))
           )],
@@ -133,6 +196,7 @@ client.on('interactionCreate', async (ix) => {
         });
       }
 
+      // /jobs
       if (ix.commandName === 'jobs') {
         const total = countOpenJobs();
         const totalPages = Math.max(1, Math.ceil(total / JOBS_PAGE_SIZE));
@@ -155,23 +219,21 @@ client.on('interactionCreate', async (ix) => {
         await ix.reply({ embeds: [embed], components: [nav], ephemeral: true });
       }
 
+      // /viewjob
       if (ix.commandName === 'viewjob') {
         const jobNumber = ix.options.getString('jobnumber', true).toUpperCase().trim();
         const job = getJobFull(jobNumber);
         if (!job) return ix.reply({ content: `Job ${jobNumber} not found.`, ephemeral: true });
 
         const embed = jobCard(job);
-        const u = getUserByDiscord(ix.user.id);
-        const actions = new ActionRowBuilder();
-
-        // Only Porters can see Take Job; enforce in button handler too
-        actions.addComponents(
+        const actions = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`job:take:${job.job_number}`).setLabel('Take Job').setStyle(ButtonStyle.Success)
         );
 
         await ix.reply({ embeds: [embed], components: [actions], ephemeral: true });
       }
 
+      // /profile
       if (ix.commandName === 'profile') {
         const member = ix.options.getUser('user') || ix.user;
         const u = getUserByDiscord(member.id);
@@ -189,26 +251,54 @@ client.on('interactionCreate', async (ix) => {
             { name: 'Verified', value: u.rsi_verified ? '✅ Yes' : '❌ No', inline: true },
             { name: 'Bio', value: u.bio || '—' }
           );
-        await ix.reply({ embeds: [embed], ephemeral: true });
+
+        const components = [];
+        if (member.id === ix.user.id) {
+          // Owner view: show unified row with switch + edit
+          components.push(roleSwitchRow(u.user_type));
+        }
+
+        await ix.reply({ embeds: [embed], components, ephemeral: true });
       }
 
+      // /editprofile — opens the same modal as the button
+      if (ix.commandName === 'editprofile') {
+        const u = getUserByDiscord(ix.user.id);
+        if (!u) return ix.reply({ content: 'Register first with `/signup`.', ephemeral: true });
+        await ix.showModal(editProfileModal());
+      }
+
+      // /deleteprofile — Owner only
+      if (ix.commandName === 'deleteprofile') {
+        if (ix.user.id !== OWNER_ID) {
+          return ix.reply({ content: 'This command is restricted.', ephemeral: true });
+        }
+        const target = ix.options.getUser('user', true);
+        const userRow = getUserByDiscord(target.id);
+        if (!userRow) {
+          return ix.reply({ content: 'That user is not registered.', ephemeral: true });
+        }
+
+        // DM the target BEFORE deletion
+        try {
+          const dm = await target.createDM();
+          await dm.send('Your PortHub profile has been deleted by an admin. Jobs and reviews remain intact.');
+        } catch {}
+
+        // Delete profile record only
+        deleteUser({ discordId: target.id });
+
+        return ix.reply({ content: `Deleted profile for **${userRow.username}**.`, ephemeral: true });
+      }
+
+      // /topporters placeholder
       if (ix.commandName === 'topporters') {
-        // naive top 10 by avg_rating then completed_jobs
-        const rows = client.topPortersCache ?? [];
-        // We’ll compute live here via DB for simplicity:
-        // better-sqlite3 quick select
-        // (Write inline tiny query)
-        // We'll just reuse db.js? For brevity, do a small import:
-        // Already imported getUserByDiscord etc; but not a top function. Quick raw:
-        // For simplicity, show instruction:
-        return ix.reply({ content: 'Coming soon: leaderboard (you can add easily by querying users ORDER BY avg_rating DESC, completed_jobs DESC LIMIT 10).', ephemeral: true });
+        return ix.reply({ content: 'Coming soon: leaderboard (query users ORDER BY avg_rating DESC, completed_jobs DESC LIMIT 10).', ephemeral: true });
       }
     }
 
-    // Component interactions (buttons/menus)
+    // Component interactions
     if (ix.isStringSelectMenu()) {
-      const [prefix, action] = ix.customId.split(':');
-
       // /signup specialty selection
       if (ix.customId === 'signup:specialty') {
         const specialty = ix.values[0];
@@ -233,8 +323,6 @@ client.on('interactionCreate', async (ix) => {
         const category = ix.values[0];
         await ix.showModal(postJobModal(category));
       }
-
-      // /jobs pagination control handler is in buttons section below (because we used buttons)
     }
 
     if (ix.isButton()) {
@@ -244,17 +332,12 @@ client.on('interactionCreate', async (ix) => {
       if (ix.customId.startsWith('signup:role:')) {
         const role = parts[2]; // PORTER or CUSTOMER
         const isPorter = role === 'PORTER';
-        // Upsert with only role + username for now
-        upsertUser({
-          discordId: ix.user.id,
-          username: ix.user.username,
-          userType: role
-        });
+        upsertUser({ discordId: ix.user.id, username: ix.user.username, userType: role });
         await ix.showModal(signupModal(isPorter));
         return;
       }
 
-      // After specialty chosen: verify ask
+      // Verify ask
       if (ix.customId.startsWith('signup:verify')) {
         const yesNo = parts[2]; // yes|no
         const u = getUserByDiscord(ix.user.id);
@@ -288,9 +371,9 @@ client.on('interactionCreate', async (ix) => {
         return ix.reply({ content: 'Verification canceled. You can verify later.', ephemeral: true });
       }
 
-      // /jobs pagination
+      // Jobs pagination
       if (ix.customId.startsWith('jobs:list')) {
-        const [, dir, pageStr] = ix.customId.split(':'); // jobs:list:prev:1
+        const [, dir, pageStr] = ix.customId.split(':');
         let page = Number(pageStr);
         if (dir === 'prev') page = Math.max(1, page - 1);
         if (dir === 'next') page = page + 1;
@@ -311,7 +394,7 @@ client.on('interactionCreate', async (ix) => {
         return ix.update({ embeds: [embed], components: [nav] });
       }
 
-      // Take job
+      // Take job (Porters only)
       if (ix.customId.startsWith('job:take:')) {
         const jobNumber = ix.customId.split(':')[2];
         const u = getUserByDiscord(ix.user.id);
@@ -325,7 +408,6 @@ client.on('interactionCreate', async (ix) => {
         }
 
         const job = getJobFull(jobNumber);
-        // DM customer with Accept/Deny
         try {
           const customerUser = await client.users.fetch(job.customer_id ? (getUserById(job.customer_id).discord_id) : '');
           const porterUser = await client.users.fetch(u.discord_id);
@@ -339,14 +421,12 @@ client.on('interactionCreate', async (ix) => {
               { name: 'Verified', value: u.rsi_verified ? '✅ Yes' : '❌ No', inline: true },
               { name: 'RSI', value: u.rsi_handle || '—', inline: true }
             );
-
           await customerUser.send({
             content: `A Porter wants to take your job ${job.job_number}. Accept this Porter?`,
             embeds: [profileEmbed],
             components: [twoButtons(`job:accept:${job.job_number}:${u.id}`, 'Accept', ButtonStyle.Success, `job:deny:${job.job_number}:${u.id}`, 'Deny', ButtonStyle.Danger)]
           });
         } catch {}
-        // DM porter
         try {
           const porterUser = await client.users.fetch(u.discord_id);
           await porterUser.send(`You’ve requested to take **${job.job_number}**. Waiting for customer approval...`);
@@ -356,7 +436,6 @@ client.on('interactionCreate', async (ix) => {
 
       // Customer Accept/Deny
       if (ix.customId.startsWith('job:accept:') || ix.customId.startsWith('job:deny:')) {
-        // customId: job:accept:JOB-1234:<porterUserId>
         const [_, action, jobNumber, porterDbId] = ix.customId.split(':');
         const job = getJobFull(jobNumber);
         if (!job) return ix.reply({ content: 'Job not found.', ephemeral: true });
@@ -370,7 +449,6 @@ client.on('interactionCreate', async (ix) => {
           setJobPorter(jobNumber, porterDbId);
           setJobStatus(jobNumber, 'ACCEPTED');
 
-          // DM both with Complete/Incomplete buttons
           const buttons = twoButtons(`job:complete:${jobNumber}`, 'Complete Job', ButtonStyle.Success, `job:incomplete:${jobNumber}`, 'Job Incomplete', ButtonStyle.Danger);
           try {
             const porter = getUserById(porterDbId);
@@ -393,11 +471,9 @@ client.on('interactionCreate', async (ix) => {
         const job = getJobFull(jobNumber);
         if (!job) return ix.reply({ content: 'Job not found.', ephemeral: true });
 
-        // Determine who pressed
         const actor = getUserByDiscord(ix.user.id);
         if (!actor) return ix.reply({ content: 'Sign up first.', ephemeral: true });
 
-        // Disable both buttons for both parties and send the “other party” a DM per your spec
         const otherId = (actor.id === job.customer_id) ? job.porter_id : job.customer_id;
         try {
           const other = getUserById(otherId);
@@ -410,11 +486,8 @@ client.on('interactionCreate', async (ix) => {
         if (action === 'complete') {
           setJobStatus(jobNumber, 'COMPLETED');
 
-          // Ask ratings (simple buttons → we’ll use ephemeral follow-ups)
           await ix.reply({ content: `Marked **${jobNumber}** as complete. Please rate your counterpart (1–5) by replying with a number in the next message.`, ephemeral: true });
 
-          // Minimalistic rating collector (next message from user)
-          const filter = m => m.author.id === ix.user.id;
           const dm = await ix.user.createDM();
           await dm.send(`Rate your counterpart for **${jobNumber}** (1–5). Optionally, include a short comment after the number.\nExample: \`5 Great job!\``);
 
@@ -423,7 +496,6 @@ client.on('interactionCreate', async (ix) => {
             const [starsStr, ...rest] = m.content.trim().split(/\s+/);
             const stars = Math.max(1, Math.min(5, parseInt(starsStr, 10) || 5));
             const text = rest.join(' ');
-            // figure reviewed user
             const reviewedId = (actor.id === job.customer_id) ? job.porter_id : job.customer_id;
             addReview({ jobId: job.id, reviewerId: actor.id, reviewedId, stars, text });
             const { avg } = refreshUserAverages(reviewedId);
@@ -437,7 +509,6 @@ client.on('interactionCreate', async (ix) => {
           setJobStatus(jobNumber, 'DISPUTED');
           await ix.reply({ content: `Marked **${jobNumber}** as incomplete. An admin will review.`, ephemeral: true });
 
-          // Post to admin channel
           if (ADMIN_CHANNEL_ID) {
             try {
               const ch = await client.channels.fetch(ADMIN_CHANNEL_ID);
@@ -446,6 +517,27 @@ client.on('interactionCreate', async (ix) => {
             } catch {}
           }
         }
+      }
+
+      // Profile buttons
+      if (ix.customId === 'profile:editbio') {
+        const u = getUserByDiscord(ix.user.id);
+        if (!u) return ix.reply({ content: 'Register first with `/signup`.', ephemeral: true });
+        await ix.showModal(editProfileModal());
+      }
+
+      if (ix.customId.startsWith('profile:switch:')) {
+        const newRole = ix.customId.split(':')[2]; // PORTER|CUSTOMER
+        const u = getUserByDiscord(ix.user.id);
+        if (!u) return ix.reply({ content: 'Register first with `/signup`.', ephemeral: true });
+        if (u.user_type === newRole) {
+          return ix.reply({ content: `You are already a **${newRole}**.`, ephemeral: true });
+        }
+        updateUserType({ discordId: ix.user.id, userType: newRole });
+
+        // Update the original message components (hide the button the user already is)
+        const components = [roleSwitchRow(newRole)];
+        return ix.update({ components });
       }
     }
 
@@ -457,27 +549,21 @@ client.on('interactionCreate', async (ix) => {
         const bio = ix.fields.getTextInputValue('bio')?.trim() || null;
         const language = ix.fields.getTextInputValue('lang')?.trim() || null;
 
-        // If CUSTOMER: we do NOT go through specialty or RSI verify flows.
         if (role === 'CUSTOMER') {
-          upsertUser({
-            discordId: ix.user.id,
-            username: ix.user.username,
-            userType: 'CUSTOMER',
-            rsiHandle, bio, language
-          });
+          upsertUser({ discordId: ix.user.id, username: ix.user.username, userType: 'CUSTOMER', rsiHandle, bio, language });
           return ix.reply({ content: 'Signup completed as **Customer**.', ephemeral: true });
         }
 
-        // If PORTER: ask specialty
-        upsertUser({
-          discordId: ix.user.id,
-          username: ix.user.username,
-          userType: 'PORTER',
-          rsiHandle, bio, language
-        });
+        upsertUser({ discordId: ix.user.id, username: ix.user.username, userType: 'PORTER', rsiHandle, bio, language });
         return ix.reply({ content: 'Choose your specialty:', components: [ (new ActionRowBuilder()).addComponents(
           new StringSelectMenuBuilder().setCustomId('signup:specialty').setPlaceholder('Choose').addOptions(SPECIALTIES.map(s => ({ label: s, value: s })))
         ) ], ephemeral: true });
+      }
+
+      if (ix.customId === 'profile:modal:edit') {
+        const bio = ix.fields.getTextInputValue('bio')?.trim() || null;
+        updateUserBio({ discordId: ix.user.id, bio });
+        return ix.reply({ content: 'Profile updated.', ephemeral: true });
       }
 
       if (ix.customId.startsWith('postjob:modal:')) {
@@ -488,13 +574,11 @@ client.on('interactionCreate', async (ix) => {
         const date = ix.fields.getTextInputValue('date')?.trim();
 
         const u = getUserByDiscord(ix.user.id);
-        if (!u || u.user_type !== 'CUSTOMER') {
-          return ix.reply({ content: 'Only **Customers** can post jobs.', ephemeral: true });
+        if (!u) {
+          return ix.reply({ content: 'Register first with `/signup`.', ephemeral: true });
         }
 
-        const job = createJob({
-          category, customerId: u.id, location: loc, payment: pay, description: desc, dateNeeded: date
-        });
+        const job = createJob({ category, customerId: u.id, location: loc, payment: pay, description: desc, dateNeeded: date });
 
         return ix.reply({
           content: `✅ Job posted: **${job.job_number}**`,
@@ -508,7 +592,6 @@ client.on('interactionCreate', async (ix) => {
         });
       }
     }
-
   } catch (err) {
     console.error(err);
     if (ix.isRepliable()) {
