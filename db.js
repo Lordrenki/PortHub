@@ -1,9 +1,10 @@
 import Database from 'better-sqlite3';
 import { nanoid } from 'nanoid';
 
+// Use the same SQLite file as before
 const db = new Database('porthub.sqlite');
 
-// Initialize schema if not present
+// ---------------- Schema bootstrap (kept) ----------------
 db.exec(`
 PRAGMA journal_mode = WAL;
 
@@ -53,7 +54,7 @@ CREATE TABLE IF NOT EXISTS reviews (
 );
 `);
 
-// ---------- USER QUERIES ----------
+// ---------------- USER QUERIES ----------------
 
 export function upsertUser({ discordId, username, userType, rsiHandle, bio, language, specialty }) {
   const get = db.prepare(`SELECT * FROM users WHERE discord_id = ?`);
@@ -86,7 +87,14 @@ export function getUserById(id) {
   return stmt.get(id);
 }
 
+// Backwards-compatible delete
 export function deleteUserByDiscord(discordId) {
+  const stmt = db.prepare(`DELETE FROM users WHERE discord_id = ?`);
+  return stmt.run(discordId).changes > 0;
+}
+
+// NEW: Canonical delete by discordId (used by index.js)
+export function deleteUser({ discordId }) {
   const stmt = db.prepare(`DELETE FROM users WHERE discord_id = ?`);
   return stmt.run(discordId).changes > 0;
 }
@@ -96,11 +104,19 @@ export function setUserVerification({ discordId, rsiCode, verified }) {
   stmt.run(rsiCode || null, verified ? 1 : 0, discordId);
 }
 
+// Backwards-compatible role switch
 export function switchUserRole(discordId, newRole) {
   const stmt = db.prepare(`UPDATE users SET user_type = ? WHERE discord_id = ?`);
   stmt.run(newRole, discordId);
 }
 
+// NEW: Canonical role update (used by index.js)
+export function updateUserType({ discordId, userType }) {
+  const stmt = db.prepare(`UPDATE users SET user_type = ? WHERE discord_id = ?`);
+  stmt.run(userType, discordId);
+}
+
+// Backwards-compatible profile update
 export function updateUserProfile(discordId, { rsiHandle, bio, language, specialty }) {
   const stmt = db.prepare(`
     UPDATE users SET
@@ -113,7 +129,13 @@ export function updateUserProfile(discordId, { rsiHandle, bio, language, special
   stmt.run(rsiHandle, bio, language, specialty, discordId);
 }
 
-// ---------- JOB QUERIES ----------
+// NEW: Canonical bio-only update (used by index.js)
+export function updateUserBio({ discordId, bio }) {
+  const stmt = db.prepare(`UPDATE users SET bio = ? WHERE discord_id = ?`);
+  stmt.run(bio || null, discordId);
+}
+
+// ---------------- JOB QUERIES ----------------
 
 export function createJob({ category, customerId, location, payment, description, dateNeeded }) {
   const id = nanoid();
@@ -126,9 +148,25 @@ export function createJob({ category, customerId, location, payment, description
   return getJobByNumber(jobNumber);
 }
 
+// Backwards-compatible (kept)
 export function getJobByNumber(jobNumber) {
   const stmt = db.prepare(`
     SELECT j.*, c.username as customer_username, p.username as porter_username
+    FROM jobs j
+    JOIN users c ON c.id = j.customer_id
+    LEFT JOIN users p ON p.id = j.porter_id
+    WHERE j.job_number = ?
+  `);
+  return stmt.get(jobNumber);
+}
+
+// NEW: Full job fetch (used by index.js)
+export function getJobFull(jobNumber) {
+  const stmt = db.prepare(`
+    SELECT
+      j.*,
+      c.username AS customer_username,
+      p.username AS porter_username
     FROM jobs j
     JOIN users c ON c.id = j.customer_id
     LEFT JOIN users p ON p.id = j.porter_id
@@ -172,7 +210,7 @@ export function setJobStatus(jobNumber, status) {
   stmt.run(status, jobNumber);
 }
 
-// ---------- REVIEWS ----------
+// ---------------- REVIEWS ----------------
 
 export function addReview({ jobId, reviewerId, reviewedId, stars, text }) {
   const id = nanoid();
@@ -184,13 +222,10 @@ export function addReview({ jobId, reviewerId, reviewedId, stars, text }) {
 }
 
 export function refreshUserAverages(reviewedUserId) {
-  const avgStmt = db.prepare(`
-    SELECT AVG(stars) as avg FROM reviews WHERE reviewed_user_id = ?
-  `);
+  const avgStmt = db.prepare(`SELECT AVG(stars) as avg FROM reviews WHERE reviewed_user_id = ?`);
   const avg = avgStmt.get(reviewedUserId)?.avg || 0;
-  const countStmt = db.prepare(`
-    SELECT COUNT(*) as cnt FROM reviews WHERE reviewed_user_id = ?
-  `);
+
+  const countStmt = db.prepare(`SELECT COUNT(*) as cnt FROM reviews WHERE reviewed_user_id = ?`);
   const cnt = countStmt.get(reviewedUserId)?.cnt || 0;
 
   const update = db.prepare(`UPDATE users SET avg_rating=? WHERE id=?`);
