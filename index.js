@@ -10,11 +10,10 @@ import {
   getJobByNumber, assignJob, setJobStatus, getJobFull, addFeedback, refreshUserFeedback,
   getUserById, setJobPorter, incrementCompletedJobs, updateUserType, updateUserBio, deleteUser,
   setJobCompletionMessages, clearJobCompletionMessages
-  getUserById, setJobPorter, incrementCompletedJobs, updateUserType, updateUserBio, deleteUser
 } from './db.js';
 import { rsiBioHasCode } from './rsi.js';
 import { nanoid } from 'nanoid';
-import { pageControls, twoButtons, infoEmbed, porterOnlyEmbed } from './utils.js';
+import { pageControls, twoButtons, infoEmbed, porterOnlyEmbed, withFooter } from './utils.js';
 
 /**
  * FULL REWRITE NOTES
@@ -108,7 +107,7 @@ function postJobModal(category) {
 }
 
 function jobCard(job) {
-  const e = new EmbedBuilder()
+  const e = withFooter(new EmbedBuilder()
     .setTitle(`${job.job_number} — ${job.category}`)
     .setColor(0x00A7E0)
     .addFields(
@@ -118,7 +117,7 @@ function jobCard(job) {
       { name: 'Date Needed', value: job.date_needed || 'N/A', inline: true },
       { name: 'Status', value: job.status, inline: true },
       { name: 'Description', value: job.description || '—' }
-    );
+    ));
   return e;
 }
 
@@ -209,7 +208,7 @@ client.on('interactionCreate', async (ix) => {
           return ix.reply({ content: 'No open jobs right now. Check back soon!', ephemeral: true });
         }
 
-        const embed = new EmbedBuilder().setTitle('Open Jobs').setColor(0x00A7E0);
+        const embed = withFooter(new EmbedBuilder().setTitle('Open Jobs').setColor(0x00A7E0));
         rows.forEach((r, i) => {
           embed.addFields({
             name: `${i + 1}. ${r.job_number} • ${r.category}`,
@@ -241,7 +240,7 @@ client.on('interactionCreate', async (ix) => {
         const u = getUserByDiscord(member.id);
         if (!u) return ix.reply({ content: 'User is not registered.', ephemeral: true });
 
-        const embed = new EmbedBuilder()
+        const embed = withFooter(new EmbedBuilder()
           .setAuthor({ name: `${u.username} (${u.user_type})`, iconURL: member.displayAvatarURL() })
           .setColor(0x00A7E0)
           .addFields(
@@ -252,7 +251,7 @@ client.on('interactionCreate', async (ix) => {
             { name: 'Language', value: u.language || '—', inline: true },
             { name: 'Verified', value: u.rsi_verified ? '✅ Yes' : '❌ No', inline: true },
             { name: 'Bio', value: u.bio || '—' }
-          );
+          ));
 
         const components = [];
         if (member.id === ix.user.id) {
@@ -385,7 +384,7 @@ client.on('interactionCreate', async (ix) => {
         if (page > totalPages) page = totalPages;
 
         const rows = listOpenJobs({ page, pageSize: JOBS_PAGE_SIZE });
-        const embed = new EmbedBuilder().setTitle('Open Jobs').setColor(0x00A7E0);
+        const embed = withFooter(new EmbedBuilder().setTitle('Open Jobs').setColor(0x00A7E0));
         rows.forEach((r, i) => {
           embed.addFields({
             name: `${i + 1 + (page - 1) * JOBS_PAGE_SIZE}. ${r.job_number} • ${r.category}`,
@@ -413,7 +412,7 @@ client.on('interactionCreate', async (ix) => {
         try {
           const customerUser = await client.users.fetch(job.customer_id ? (getUserById(job.customer_id).discord_id) : '');
           const porterUser = await client.users.fetch(u.discord_id);
-          const profileEmbed = new EmbedBuilder()
+          const profileEmbed = withFooter(new EmbedBuilder()
             .setTitle(`Porter Request: ${porterUser.username}`)
             .setThumbnail(porterUser.displayAvatarURL())
             .addFields(
@@ -422,7 +421,7 @@ client.on('interactionCreate', async (ix) => {
               { name: 'Completed Jobs', value: String(u.completed_jobs || 0), inline: true },
               { name: 'Verified', value: u.rsi_verified ? '✅ Yes' : '❌ No', inline: true },
               { name: 'RSI', value: u.rsi_handle || '—', inline: true }
-            );
+            ));
           await customerUser.send({
             content: `A Porter wants to take your job ${job.job_number}. Accept this Porter?`,
             embeds: [profileEmbed],
