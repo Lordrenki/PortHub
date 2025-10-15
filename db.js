@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS users (
   rsi_code TEXT,
   rsi_verified INTEGER DEFAULT 0,
   avg_rating REAL DEFAULT 0,
+  likes_count INTEGER DEFAULT 0,
+  dislikes_count INTEGER DEFAULT 0,
   completed_jobs INTEGER DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now'))
 );
@@ -53,6 +55,18 @@ CREATE TABLE IF NOT EXISTS reviews (
   FOREIGN KEY(reviewed_user_id) REFERENCES users(id)
 );
 `);
+
+function ensureColumn(table, column, definition) {
+  const info = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!info.some(c => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+ensureColumn('users', 'likes_count', 'INTEGER DEFAULT 0');
+ensureColumn('users', 'dislikes_count', 'INTEGER DEFAULT 0');
+ensureColumn('jobs', 'completion_customer_message_id', 'TEXT');
+ensureColumn('jobs', 'completion_porter_message_id', 'TEXT');
 
 // ---------------- USER QUERIES ----------------
 
@@ -175,6 +189,26 @@ export function getJobFull(jobNumber) {
   return stmt.get(jobNumber);
 }
 
+export function setJobCompletionMessages({ jobNumber, customerMessageId, porterMessageId }) {
+  const stmt = db.prepare(`
+    UPDATE jobs
+    SET completion_customer_message_id = ?,
+        completion_porter_message_id = ?
+    WHERE job_number = ?
+  `);
+  stmt.run(customerMessageId ?? null, porterMessageId ?? null, jobNumber);
+}
+
+export function clearJobCompletionMessages(jobNumber) {
+  const stmt = db.prepare(`
+    UPDATE jobs
+    SET completion_customer_message_id = NULL,
+        completion_porter_message_id = NULL
+    WHERE job_number = ?
+  `);
+  stmt.run(jobNumber);
+}
+
 export function listOpenJobs({ page, pageSize }) {
   const offset = (page - 1) * pageSize;
   const stmt = db.prepare(`
@@ -210,28 +244,39 @@ export function setJobStatus(jobNumber, status) {
   stmt.run(status, jobNumber);
 }
 
-// ---------------- REVIEWS ----------------
+// ---------------- FEEDBACK ----------------
 
-export function addReview({ jobId, reviewerId, reviewedId, stars, text }) {
+export function addFeedback({ jobId, reviewerId, reviewedId, liked }) {
   const id = nanoid();
   const stmt = db.prepare(`
     INSERT INTO reviews (id, job_id, reviewer_user_id, reviewed_user_id, stars, text)
-    VALUES (?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, NULL)
   `);
-  stmt.run(id, jobId, reviewerId, reviewedId, stars, text || null);
+  stmt.run(id, jobId, reviewerId, reviewedId, liked ? 1 : 0);
 }
 
-export function refreshUserAverages(reviewedUserId) {
-  const avgStmt = db.prepare(`SELECT AVG(stars) as avg FROM reviews WHERE reviewed_user_id = ?`);
-  const avg = avgStmt.get(reviewedUserId)?.avg || 0;
+export function refreshUserFeedback(reviewedUserId) {
+  const statsStmt = db.prepare(`
+    SELECT
+      COALESCE(SUM(stars), 0) AS likes,
+      COUNT(*) AS total
+    FROM reviews
+    WHERE reviewed_user_id = ?
+  `);
+  const { likes = 0, total = 0 } = statsStmt.get(reviewedUserId) || {};
+  const dislikes = total - likes;
 
-  const countStmt = db.prepare(`SELECT COUNT(*) as cnt FROM reviews WHERE reviewed_user_id = ?`);
-  const cnt = countStmt.get(reviewedUserId)?.cnt || 0;
+  const update = db.prepare(`UPDATE users SET likes_count=?, dislikes_count=? WHERE id=?`);
+  update.run(likes, dislikes, reviewedUserId);
 
-  const update = db.prepare(`UPDATE users SET avg_rating=? WHERE id=?`);
-  update.run(avg, reviewedUserId);
+  return { likes, dislikes, total };
+}
 
-  return { avg, cnt };
+const existingFeedbackOwners = db.prepare(`SELECT DISTINCT reviewed_user_id AS id FROM reviews`).all();
+for (const row of existingFeedbackOwners) {
+  if (row?.id) {
+    refreshUserFeedback(row.id);
+  }
 }
 
 export function incrementCompletedJobs(userId) {

@@ -8,6 +8,12 @@ import {
 
 import { CATEGORIES, SPECIALTIES, JOBS_PAGE_SIZE } from './config.js';
 
+export const EMBED_FOOTER_TEXT = '© 2025 PortHub. Made with ❤ by Kuro.';
+
+export function withFooter(embed) {
+  return embed.setFooter({ text: EMBED_FOOTER_TEXT });
+}
+
 // --------------------- PAGINATION CONTROLS ---------------------
 
 export function pageControls(page, totalPages, baseCustomId) {
@@ -57,7 +63,7 @@ export function twoButtons(idLeft, labelLeft, styleLeft, idRight, labelRight, st
 // --------------------- INFO EMBED ---------------------
 
 export function infoEmbed(title, fields) {
-  const e = new EmbedBuilder().setTitle(title).setColor(0x00A7E0);
+  const e = withFooter(new EmbedBuilder().setTitle(title).setColor(0x00A7E0));
   if (fields) {
     e.addFields(fields.map(([name, value, inline]) => ({
       name,
@@ -71,16 +77,16 @@ export function infoEmbed(title, fields) {
 // --------------------- PORTER-ONLY EMBED ---------------------
 
 export function porterOnlyEmbed() {
-  return new EmbedBuilder()
+  return withFooter(new EmbedBuilder()
     .setTitle('Porter Only')
     .setDescription('Only registered **Porters** can take jobs. Use `/signup` to register as a Porter.')
-    .setColor(0xE67E22);
+    .setColor(0xE67E22));
 }
 
 // --------------------- JOB CARD EMBED ---------------------
 
 export function jobCard(job) {
-  const e = new EmbedBuilder()
+  const e = withFooter(new EmbedBuilder()
     .setTitle(`${job.job_number} — ${job.category}`)
     .setColor(0x00A7E0)
     .addFields(
@@ -90,28 +96,28 @@ export function jobCard(job) {
       { name: 'Date Needed', value: job.date_needed || 'N/A', inline: true },
       { name: 'Status', value: job.status, inline: true },
       { name: 'Description', value: job.description || '—' }
-    );
+    ));
   return e;
 }
 
 // --------------------- PROFILE EMBED ---------------------
 
 export function profileEmbed(user, discordUser) {
-  const embed = new EmbedBuilder()
+  const embed = withFooter(new EmbedBuilder()
     .setAuthor({
       name: `${user.username} (${user.user_type})`,
       iconURL: discordUser?.displayAvatarURL?.()
     })
     .setColor(0x00A7E0)
     .addFields(
-      { name: 'Avg Rating', value: `${(user.avg_rating || 0).toFixed(2)} ⭐`, inline: true },
+      { name: 'Likes', value: `${user.likes_count || 0} 👍`, inline: true },
       { name: 'Completed Jobs', value: String(user.completed_jobs || 0), inline: true },
       { name: 'RSI Handle', value: user.rsi_handle || '—', inline: true },
       { name: 'Specialty', value: user.specialty || '—', inline: true },
       { name: 'Language', value: user.language || '—', inline: true },
       { name: 'Verified', value: user.rsi_verified ? '✅ Yes' : '❌ No', inline: true },
       { name: 'Bio', value: user.bio || '—' }
-    );
+    ));
   return embed;
 }
 
