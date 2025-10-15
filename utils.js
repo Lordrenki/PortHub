@@ -104,7 +104,7 @@ export function profileEmbed(user, discordUser) {
     })
     .setColor(0x00A7E0)
     .addFields(
-      { name: 'Avg Rating', value: `${(user.avg_rating || 0).toFixed(2)} ⭐`, inline: true },
+      { name: 'Likes', value: `${user.likes_count || 0} 👍`, inline: true },
       { name: 'Completed Jobs', value: String(user.completed_jobs || 0), inline: true },
       { name: 'RSI Handle', value: user.rsi_handle || '—', inline: true },
       { name: 'Specialty', value: user.specialty || '—', inline: true },
