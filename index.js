@@ -7,7 +7,7 @@ import {
 import { TOKEN, JOBS_PAGE_SIZE, CATEGORIES, SPECIALTIES, ADMIN_CHANNEL_ID, TICKET_DM, CLIENT_ID, GUILD_ID } from './config.js';
 import {
   upsertUser, getUserByDiscord, setUserVerification, createJob, listOpenJobs, countOpenJobs,
-  getJobByNumber, assignJob, setJobStatus, getJobFull, addReview, refreshUserAverages,
+  getJobByNumber, assignJob, setJobStatus, getJobFull, addFeedback, refreshUserFeedback,
   getUserById, setJobPorter, incrementCompletedJobs, updateUserType, updateUserBio, deleteUser
 } from './db.js';
 import { rsiBioHasCode } from './rsi.js';
@@ -22,7 +22,7 @@ import { pageControls, twoButtons, infoEmbed, porterOnlyEmbed } from './utils.js
  *     - Switch role (shows only the option they AREN'T already)
  *     - Edit bio (modal)
  * - Adds /editprofile to open the same modal via command.
- * - Keeps original jobs listing, view job, take job, acceptance, dispute, completion, and rating flow.
+ * - Keeps original jobs listing, view job, take job, acceptance, dispute, completion, and like/dislike feedback flow.
  *
  * DB EXPECTATIONS (SQLite via ./db.js):
  * - updateUserType({ discordId, userType })
@@ -243,7 +243,7 @@ client.on('interactionCreate', async (ix) => {
           .setAuthor({ name: `${u.username} (${u.user_type})`, iconURL: member.displayAvatarURL() })
           .setColor(0x00A7E0)
           .addFields(
-            { name: 'Avg Rating', value: `${(u.avg_rating || 0).toFixed(2)} ⭐`, inline: true },
+            { name: 'Likes', value: `${u.likes_count || 0} 👍`, inline: true },
             { name: 'Completed Jobs', value: String(u.completed_jobs || 0), inline: true },
             { name: 'RSI Handle', value: u.rsi_handle || '—', inline: true },
             { name: 'Specialty', value: u.specialty || '—', inline: true },
@@ -293,7 +293,7 @@ client.on('interactionCreate', async (ix) => {
 
       // /topporters placeholder
       if (ix.commandName === 'topporters') {
-        return ix.reply({ content: 'Coming soon: leaderboard (query users ORDER BY avg_rating DESC, completed_jobs DESC LIMIT 10).', ephemeral: true });
+        return ix.reply({ content: 'Coming soon: leaderboard (query users ORDER BY likes_count DESC, completed_jobs DESC LIMIT 10).', ephemeral: true });
       }
     }
 
@@ -416,7 +416,7 @@ client.on('interactionCreate', async (ix) => {
             .setThumbnail(porterUser.displayAvatarURL())
             .addFields(
               { name: 'Specialty', value: u.specialty || '—', inline: true },
-              { name: 'Avg Rating', value: `${(u.avg_rating || 0).toFixed(2)} ⭐`, inline: true },
+              { name: 'Likes', value: `${u.likes_count || 0} 👍`, inline: true },
               { name: 'Completed Jobs', value: String(u.completed_jobs || 0), inline: true },
               { name: 'Verified', value: u.rsi_verified ? '✅ Yes' : '❌ No', inline: true },
               { name: 'RSI', value: u.rsi_handle || '—', inline: true }
@@ -483,31 +483,34 @@ client.on('interactionCreate', async (ix) => {
           }
         } catch {}
 
+        await ix.update({ components: [] });
+
         if (action === 'complete') {
           setJobStatus(jobNumber, 'COMPLETED');
+          const reviewedId = (actor.id === job.customer_id) ? job.porter_id : job.customer_id;
+          if (reviewedId) {
+            const reviewedRole = reviewedId === job.porter_id ? 'PORTER' : 'CUSTOMER';
+            const feedbackRow = new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setCustomId(`feedback:like:${job.id}:${actor.id}:${reviewedId}:${reviewedRole}`)
+                .setStyle(ButtonStyle.Success)
+                .setLabel('👍 Like'),
+              new ButtonBuilder()
+                .setCustomId(`feedback:dislike:${job.id}:${actor.id}:${reviewedId}:${reviewedRole}`)
+                .setStyle(ButtonStyle.Danger)
+                .setLabel('👎 Dislike')
+            );
 
-          await ix.reply({ content: `Marked **${jobNumber}** as complete. Please rate your counterpart (1–5) by replying with a number in the next message.`, ephemeral: true });
-
-          const dm = await ix.user.createDM();
-          await dm.send(`Rate your counterpart for **${jobNumber}** (1–5). Optionally, include a short comment after the number.\nExample: \`5 Great job!\``);
-
-          const collector = dm.createMessageCollector({ time: 60_000, max: 1 });
-          collector.on('collect', (m) => {
-            const [starsStr, ...rest] = m.content.trim().split(/\s+/);
-            const stars = Math.max(1, Math.min(5, parseInt(starsStr, 10) || 5));
-            const text = rest.join(' ');
-            const reviewedId = (actor.id === job.customer_id) ? job.porter_id : job.customer_id;
-            addReview({ jobId: job.id, reviewerId: actor.id, reviewedId, stars, text });
-            const { avg } = refreshUserAverages(reviewedId);
-            if (reviewedId === job.porter_id && stars >= 1) {
-              incrementCompletedJobs(reviewedId);
-            }
-            dm.send(`Thanks! Recorded ${stars}★${text ? ` — "${text}"` : ''}.`);
-          });
-
+            await ix.followUp({
+              content: `✅ Marked **${jobNumber}** as complete. Share how it went with a Like or Dislike (dislikes stay private).`,
+              components: [feedbackRow]
+            });
+          } else {
+            await ix.followUp({ content: `✅ Marked **${jobNumber}** as complete.` });
+          }
         } else {
           setJobStatus(jobNumber, 'DISPUTED');
-          await ix.reply({ content: `Marked **${jobNumber}** as incomplete. An admin will review.`, ephemeral: true });
+          await ix.followUp({ content: `🚨 Marked **${jobNumber}** as incomplete. An admin will review.` });
 
           if (ADMIN_CHANNEL_ID) {
             try {
@@ -517,6 +520,28 @@ client.on('interactionCreate', async (ix) => {
             } catch {}
           }
         }
+      }
+
+      if (ix.customId.startsWith('feedback:')) {
+        const [_, action, jobId, reviewerId, reviewedId, reviewedRole] = ix.customId.split(':');
+        const actor = getUserByDiscord(ix.user.id);
+        if (!actor || actor.id !== reviewerId) {
+          return ix.reply({ content: 'This feedback request is not for you.', ephemeral: true });
+        }
+
+        const liked = action === 'like';
+        addFeedback({ jobId, reviewerId, reviewedId, liked });
+        refreshUserFeedback(reviewedId);
+        if (reviewedRole === 'PORTER') {
+          incrementCompletedJobs(reviewedId);
+        }
+
+        await ix.update({
+          content: liked
+            ? '👍 Thanks! Your Like has been recorded.'
+            : '👎 Thanks! Your Dislike has been recorded privately.',
+          components: []
+        });
       }
 
       // Profile buttons
