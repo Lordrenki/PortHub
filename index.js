@@ -13,7 +13,7 @@ import {
 } from './db.js';
 import { rsiBioHasCode } from './rsi.js';
 import { nanoid } from 'nanoid';
-import { pageControls, twoButtons, infoEmbed, porterOnlyEmbed, withFooter } from './utils.js';
+import { pageControls, twoButtons, infoEmbed, porterOnlyEmbed, withFooter, jobCard } from './utils.js';
 
 /**
  * FULL REWRITE NOTES
@@ -104,30 +104,6 @@ function postJobModal(category) {
     new ActionRowBuilder().addComponents(date)
   );
   return modal;
-}
-
-function jobCard(job) {
-  const e = withFooter(new EmbedBuilder()
-    .setTitle(`${job.job_number} — ${job.category}`)
-    .setColor(0x00A7E0)
-    .addFields(
-      { name: 'Payment (aUEC)', value: String(job.payment_auec || 0), inline: true },
-      { name: 'Location', value: job.location || 'N/A', inline: true },
-      { name: 'Customer', value: job.customer_username, inline: true },
-      { name: 'Date Needed', value: job.date_needed || 'N/A', inline: true },
-      { name: 'Status', value: job.status, inline: true },
-      { name: 'Description', value: job.description || '—' }
-    ));
-  return e;
-}
-
-async function dmOrReply(ix, content, embeds, components) {
-  try {
-    const dm = await ix.user.createDM();
-    await dm.send({ content, embeds, components });
-  } catch {
-    await ix.reply({ content, embeds, components, ephemeral: true });
-  }
 }
 
 // ---------------- COMMAND REGISTRATION ----------------
@@ -228,13 +204,10 @@ async function handleChatInputCommand(ix) {
         return;
       }
 
-        const embed = withFooter(new EmbedBuilder().setTitle('Open Jobs').setColor(0x00A7E0));
-        rows.forEach((r, i) => {
-          embed.addFields({
-            name: `${i + 1}. ${r.job_number} • ${r.category}`,
-            value: `**Payment:** ${r.payment_auec || 0} aUEC • **Customer:** ${r.customer_username}`
-          });
-        });
+      const embed = jobCard(job);
+      const actions = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`job:take:${job.job_number}`).setLabel('Take Job').setStyle(ButtonStyle.Success)
+      );
 
       await ix.reply({ embeds: [embed], components: [actions], ephemeral: true });
       return;
@@ -295,24 +268,18 @@ async function handleChatInputCommand(ix) {
         await dm.send('Your PortHub profile has been deleted by an admin. Jobs and reviews remain intact.');
       } catch {}
 
-        const embed = withFooter(new EmbedBuilder()
-          .setAuthor({ name: `${u.username} (${u.user_type})`, iconURL: member.displayAvatarURL() })
-          .setColor(0x00A7E0)
-          .addFields(
-            { name: 'Likes', value: `${u.likes_count || 0} 👍`, inline: true },
-            { name: 'Completed Jobs', value: String(u.completed_jobs || 0), inline: true },
-            { name: 'RSI Handle', value: u.rsi_handle || '—', inline: true },
-            { name: 'Specialty', value: u.specialty || '—', inline: true },
-            { name: 'Language', value: u.language || '—', inline: true },
-            { name: 'Verified', value: u.rsi_verified ? '✅ Yes' : '❌ No', inline: true },
-            { name: 'Bio', value: u.bio || '—' }
-          ));
-
-        const components = [];
-        if (member.id === ix.user.id) {
-          // Owner view: show unified row with switch + edit
-          components.push(roleSwitchRow(u.user_type));
-        }
+      deleteUser({ discordId: target.id });
+      await ix.reply({ content: `Deleted profile for **${userRow.username}**.`, ephemeral: true });
+      return;
+    }
+    case 'topporters': {
+      await ix.reply({ content: 'Coming soon: leaderboard (query users ORDER BY likes_count DESC, completed_jobs DESC LIMIT 10).', ephemeral: true });
+      return;
+    }
+    default:
+      return;
+  }
+}
 
 async function handleSelectMenu(ix) {
   if (ix.customId === 'signup:specialty') {
@@ -366,10 +333,16 @@ async function handleButtonInteraction(ix) {
       return;
     }
 
-      // /topporters placeholder
-      if (ix.commandName === 'topporters') {
-        return ix.reply({ content: 'Coming soon: leaderboard (query users ORDER BY likes_count DESC, completed_jobs DESC LIMIT 10).', ephemeral: true });
-      }
+    if (yesNo === 'yes') {
+      const code = `PORT-${nanoid(8)}`.toUpperCase();
+      setUserVerification({ discordId: ix.user.id, rsiCode: code, verified: false });
+      await ix.reply({
+        content: `Verification step:\n1) Go to your RSI profile bio and paste this code exactly:\n\`${code}\`\n2) When done, press **Check Now**.`,
+        components: [twoButtons('verify:check', 'Check Now', ButtonStyle.Success, 'verify:cancel', 'Cancel', ButtonStyle.Secondary)],
+        ephemeral: true
+      });
+    } else {
+      await ix.reply({ content: 'Signup finished without RSI verification. You can verify later.', ephemeral: true });
     }
     return;
   }
@@ -434,24 +407,25 @@ async function handleButtonInteraction(ix) {
     const job = getJobFull(jobNumber);
     const customerRecord = job?.customer_id ? getUserById(job.customer_id) : null;
 
-      // Jobs pagination
-      if (ix.customId.startsWith('jobs:list')) {
-        const [, dir, pageStr] = ix.customId.split(':');
-        let page = Number(pageStr);
-        if (dir === 'prev') page = Math.max(1, page - 1);
-        if (dir === 'next') page = page + 1;
+    if (customerRecord) {
+      try {
+        const customerUser = await client.users.fetch(customerRecord.discord_id);
+        const porterUser = await client.users.fetch(porter.discord_id);
+        const profileEmbed = withFooter(new EmbedBuilder()
+          .setTitle(`Porter Request: ${porterUser.username}`)
+          .setThumbnail(porterUser.displayAvatarURL())
+          .addFields(
+            { name: 'Specialty', value: porter.specialty || '—', inline: true },
+            { name: 'Likes', value: `${porter.likes_count || 0} 👍`, inline: true },
+            { name: 'Completed Jobs', value: String(porter.completed_jobs || 0), inline: true },
+            { name: 'Verified', value: porter.rsi_verified ? '✅ Yes' : '❌ No', inline: true },
+            { name: 'RSI', value: porter.rsi_handle || '—', inline: true }
+          ));
 
-        const total = countOpenJobs();
-        const totalPages = Math.max(1, Math.ceil(total / JOBS_PAGE_SIZE));
-        if (page > totalPages) page = totalPages;
-
-        const rows = listOpenJobs({ page, pageSize: JOBS_PAGE_SIZE });
-        const embed = withFooter(new EmbedBuilder().setTitle('Open Jobs').setColor(0x00A7E0));
-        rows.forEach((r, i) => {
-          embed.addFields({
-            name: `${i + 1 + (page - 1) * JOBS_PAGE_SIZE}. ${r.job_number} • ${r.category}`,
-            value: `**Payment:** ${r.payment_auec || 0} aUEC • **Customer:** ${r.customer_username}`
-          });
+        await customerUser.send({
+          content: `A Porter wants to take your job ${job.job_number}. Accept this Porter?`,
+          embeds: [profileEmbed],
+          components: [twoButtons(`job:accept:${job.job_number}:${porter.id}`, 'Accept', ButtonStyle.Success, `job:deny:${job.job_number}:${porter.id}`, 'Deny', ButtonStyle.Danger)]
         });
       } catch {}
     }
@@ -465,32 +439,13 @@ async function handleButtonInteraction(ix) {
     return;
   }
 
-        const job = getJobFull(jobNumber);
-        try {
-          const customerUser = await client.users.fetch(job.customer_id ? (getUserById(job.customer_id).discord_id) : '');
-          const porterUser = await client.users.fetch(u.discord_id);
-          const profileEmbed = withFooter(new EmbedBuilder()
-            .setTitle(`Porter Request: ${porterUser.username}`)
-            .setThumbnail(porterUser.displayAvatarURL())
-            .addFields(
-              { name: 'Specialty', value: u.specialty || '—', inline: true },
-              { name: 'Likes', value: `${u.likes_count || 0} 👍`, inline: true },
-              { name: 'Completed Jobs', value: String(u.completed_jobs || 0), inline: true },
-              { name: 'Verified', value: u.rsi_verified ? '✅ Yes' : '❌ No', inline: true },
-              { name: 'RSI', value: u.rsi_handle || '—', inline: true }
-            ));
-          await customerUser.send({
-            content: `A Porter wants to take your job ${job.job_number}. Accept this Porter?`,
-            embeds: [profileEmbed],
-            components: [twoButtons(`job:accept:${job.job_number}:${u.id}`, 'Accept', ButtonStyle.Success, `job:deny:${job.job_number}:${u.id}`, 'Deny', ButtonStyle.Danger)]
-          });
-        } catch {}
-        try {
-          const porterUser = await client.users.fetch(u.discord_id);
-          await porterUser.send(`You’ve requested to take **${job.job_number}**. Waiting for customer approval...`);
-        } catch {}
-        return ix.reply({ content: `Requested to take ${jobNumber}. The customer has been notified.`, ephemeral: true });
-      }
+  if (ix.customId.startsWith('job:accept:') || ix.customId.startsWith('job:deny:')) {
+    const [, action, jobNumber, porterDbId] = parts;
+    const job = getJobFull(jobNumber);
+    if (!job) {
+      await ix.reply({ content: 'Job not found.', ephemeral: true });
+      return;
+    }
 
     const customer = getUserByDiscord(ix.user.id);
     if (!customer || customer.id !== job.customer_id) {
@@ -523,37 +478,14 @@ async function handleButtonInteraction(ix) {
         }
       } catch {}
 
-        if (action === 'accept') {
-          setJobPorter(jobNumber, porterDbId);
-          setJobStatus(jobNumber, 'ACCEPTED');
-
-          const buttons = twoButtons(`job:complete:${jobNumber}`, 'Complete Job', ButtonStyle.Success, `job:incomplete:${jobNumber}`, 'Job Incomplete', ButtonStyle.Danger);
-          const embed = jobCard(getJobFull(jobNumber));
-          let customerMessageId = null;
-          let porterMessageId = null;
-
-          try {
-            const customerUser = await client.users.fetch(customer.discord_id);
-            const sent = await customerUser.send({ content: `You accepted **${jobNumber}**.`, embeds: [embed], components: [buttons] });
-            customerMessageId = sent.id;
-          } catch {}
-
-          try {
-            const porter = getUserById(porterDbId);
-            if (porter) {
-              const porterUser = await client.users.fetch(porter.discord_id);
-              const sent = await porterUser.send({ content: `Customer accepted you for **${jobNumber}**.`, embeds: [embed], components: [buttons] });
-              porterMessageId = sent.id;
-            }
-          } catch {}
-
-          setJobCompletionMessages({ jobNumber, customerMessageId, porterMessageId });
-          return ix.update({ content: `✅ Accepted for ${jobNumber}.`, components: [] });
-        } else {
-          setJobStatus(jobNumber, 'OPEN');
-          return ix.update({ content: `❌ Denied. Job ${jobNumber} is back open.`, components: [] });
-        }
-      }
+      setJobCompletionMessages({ jobNumber, customerMessageId, porterMessageId });
+      await ix.update({ content: `✅ Accepted for ${jobNumber}.`, components: [] });
+    } else {
+      setJobStatus(jobNumber, 'OPEN');
+      await ix.update({ content: `❌ Denied. Job ${jobNumber} is back open.`, components: [] });
+    }
+    return;
+  }
 
   if (ix.customId.startsWith('job:complete:') || ix.customId.startsWith('job:incomplete:')) {
     const [, action, jobNumber] = parts;
@@ -569,77 +501,20 @@ async function handleButtonInteraction(ix) {
       return;
     }
 
-        const otherId = (actor.id === job.customer_id) ? job.porter_id : job.customer_id;
-        const otherMessageId = (actor.id === job.customer_id)
-          ? job.completion_porter_message_id
-          : job.completion_customer_message_id;
+    const otherId = actor.id === job.customer_id ? job.porter_id : job.customer_id;
+    const otherMessageId = actor.id === job.customer_id
+      ? job.completion_porter_message_id
+      : job.completion_customer_message_id;
 
-        await ix.update({ components: [] });
+    await ix.update({ components: [] });
 
-        if (otherId) {
-          try {
-            const other = getUserById(otherId);
-            if (other) {
-              const otherUser = await client.users.fetch(other.discord_id);
-              const dmChannel = await otherUser.createDM();
-              if (otherMessageId) {
-                try {
-                  const msg = await dmChannel.messages.fetch(otherMessageId);
-                  await msg.edit({ components: [] });
-                } catch {}
-              }
-              await dmChannel.send(`The other party has acted on **${jobNumber}**. ${TICKET_DM}`);
-            }
-          } catch {}
-        }
-
-        clearJobCompletionMessages(jobNumber);
-
-        if (action === 'complete') {
-          setJobStatus(jobNumber, 'COMPLETED');
-          const reviewedId = (actor.id === job.customer_id) ? job.porter_id : job.customer_id;
-          if (reviewedId) {
-            const reviewedRole = reviewedId === job.porter_id ? 'PORTER' : 'CUSTOMER';
-            const feedbackRow = new ActionRowBuilder().addComponents(
-              new ButtonBuilder()
-                .setCustomId(`feedback:like:${job.id}:${actor.id}:${reviewedId}:${reviewedRole}`)
-                .setStyle(ButtonStyle.Success)
-                .setLabel('👍 Like'),
-              new ButtonBuilder()
-                .setCustomId(`feedback:dislike:${job.id}:${actor.id}:${reviewedId}:${reviewedRole}`)
-                .setStyle(ButtonStyle.Danger)
-                .setLabel('👎 Dislike')
-            );
-
-
-        if (action === 'complete') {
-          setJobStatus(jobNumber, 'COMPLETED');
-          const reviewedId = (actor.id === job.customer_id) ? job.porter_id : job.customer_id;
-          if (reviewedId) {
-            const reviewedRole = reviewedId === job.porter_id ? 'PORTER' : 'CUSTOMER';
-            const feedbackRow = new ActionRowBuilder().addComponents(
-              new ButtonBuilder()
-                .setCustomId(`feedback:like:${job.id}:${actor.id}:${reviewedId}:${reviewedRole}`)
-                .setStyle(ButtonStyle.Success)
-                .setLabel('👍 Like'),
-              new ButtonBuilder()
-                .setCustomId(`feedback:dislike:${job.id}:${actor.id}:${reviewedId}:${reviewedRole}`)
-                .setStyle(ButtonStyle.Danger)
-                .setLabel('👎 Dislike')
-            );
-
-            await ix.followUp({
-              content: `✅ Marked **${jobNumber}** as complete. Share how it went with a Like or Dislike (dislikes stay private).`,
-              components: [feedbackRow]
-            });
-          } else {
-            await ix.followUp({ content: `✅ Marked **${jobNumber}** as complete.` });
-          }
-        } else {
-          setJobStatus(jobNumber, 'DISPUTED');
-          await ix.followUp({ content: `🚨 Marked **${jobNumber}** as incomplete. An admin will review.` });
-
-          if (ADMIN_CHANNEL_ID) {
+    if (otherId) {
+      try {
+        const other = getUserById(otherId);
+        if (other) {
+          const otherUser = await client.users.fetch(other.discord_id);
+          const dmChannel = await otherUser.createDM();
+          if (otherMessageId) {
             try {
               const msg = await dmChannel.messages.fetch(otherMessageId);
               await msg.edit({ components: [] });
@@ -679,33 +554,12 @@ async function handleButtonInteraction(ix) {
       setJobStatus(jobNumber, 'DISPUTED');
       await ix.followUp({ content: `🚨 Marked **${jobNumber}** as incomplete. An admin will review.` });
 
-      if (ix.customId.startsWith('feedback:')) {
-        const [_, action, jobId, reviewerId, reviewedId, reviewedRole] = ix.customId.split(':');
-        const actor = getUserByDiscord(ix.user.id);
-        if (!actor || actor.id !== reviewerId) {
-          return ix.reply({ content: 'This feedback request is not for you.', ephemeral: true });
-        }
-
-        const liked = action === 'like';
-        addFeedback({ jobId, reviewerId, reviewedId, liked });
-        refreshUserFeedback(reviewedId);
-        if (reviewedRole === 'PORTER') {
-          incrementCompletedJobs(reviewedId);
-        }
-
-        await ix.update({
-          content: liked
-            ? '👍 Thanks! Your Like has been recorded.'
-            : '👎 Thanks! Your Dislike has been recorded privately.',
-          components: []
-        });
-      }
-
-      // Profile buttons
-      if (ix.customId === 'profile:editbio') {
-        const u = getUserByDiscord(ix.user.id);
-        if (!u) return ix.reply({ content: 'Register first with `/signup`.', ephemeral: true });
-        await ix.showModal(editProfileModal());
+      if (ADMIN_CHANNEL_ID) {
+        try {
+          const ch = await client.channels.fetch(ADMIN_CHANNEL_ID);
+          const embed = jobCard(job);
+          await ch.send({ content: `🚨 Dispute opened for **${jobNumber}**`, embeds: [embed] });
+        } catch {}
       }
     }
     return;
