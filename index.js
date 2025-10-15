@@ -529,6 +529,23 @@ client.on('interactionCreate', async (ix) => {
                 .setLabel('👎 Dislike')
             );
 
+
+        if (action === 'complete') {
+          setJobStatus(jobNumber, 'COMPLETED');
+          const reviewedId = (actor.id === job.customer_id) ? job.porter_id : job.customer_id;
+          if (reviewedId) {
+            const reviewedRole = reviewedId === job.porter_id ? 'PORTER' : 'CUSTOMER';
+            const feedbackRow = new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setCustomId(`feedback:like:${job.id}:${actor.id}:${reviewedId}:${reviewedRole}`)
+                .setStyle(ButtonStyle.Success)
+                .setLabel('👍 Like'),
+              new ButtonBuilder()
+                .setCustomId(`feedback:dislike:${job.id}:${actor.id}:${reviewedId}:${reviewedRole}`)
+                .setStyle(ButtonStyle.Danger)
+                .setLabel('👎 Dislike')
+            );
+
             await ix.followUp({
               content: `✅ Marked **${jobNumber}** as complete. Share how it went with a Like or Dislike (dislikes stay private).`,
               components: [feedbackRow]
