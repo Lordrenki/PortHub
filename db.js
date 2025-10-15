@@ -65,6 +65,8 @@ function ensureColumn(table, column, definition) {
 
 ensureColumn('users', 'likes_count', 'INTEGER DEFAULT 0');
 ensureColumn('users', 'dislikes_count', 'INTEGER DEFAULT 0');
+ensureColumn('jobs', 'completion_customer_message_id', 'TEXT');
+ensureColumn('jobs', 'completion_porter_message_id', 'TEXT');
 
 // ---------------- USER QUERIES ----------------
 
@@ -185,6 +187,26 @@ export function getJobFull(jobNumber) {
     WHERE j.job_number = ?
   `);
   return stmt.get(jobNumber);
+}
+
+export function setJobCompletionMessages({ jobNumber, customerMessageId, porterMessageId }) {
+  const stmt = db.prepare(`
+    UPDATE jobs
+    SET completion_customer_message_id = ?,
+        completion_porter_message_id = ?
+    WHERE job_number = ?
+  `);
+  stmt.run(customerMessageId ?? null, porterMessageId ?? null, jobNumber);
+}
+
+export function clearJobCompletionMessages(jobNumber) {
+  const stmt = db.prepare(`
+    UPDATE jobs
+    SET completion_customer_message_id = NULL,
+        completion_porter_message_id = NULL
+    WHERE job_number = ?
+  `);
+  stmt.run(jobNumber);
 }
 
 export function listOpenJobs({ page, pageSize }) {

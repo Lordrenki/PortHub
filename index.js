@@ -8,6 +8,8 @@ import { TOKEN, JOBS_PAGE_SIZE, CATEGORIES, SPECIALTIES, ADMIN_CHANNEL_ID, TICKE
 import {
   upsertUser, getUserByDiscord, setUserVerification, createJob, listOpenJobs, countOpenJobs,
   getJobByNumber, assignJob, setJobStatus, getJobFull, addFeedback, refreshUserFeedback,
+  getUserById, setJobPorter, incrementCompletedJobs, updateUserType, updateUserBio, deleteUser,
+  setJobCompletionMessages, clearJobCompletionMessages
   getUserById, setJobPorter, incrementCompletedJobs, updateUserType, updateUserBio, deleteUser
 } from './db.js';
 import { rsiBioHasCode } from './rsi.js';
@@ -450,14 +452,26 @@ client.on('interactionCreate', async (ix) => {
           setJobStatus(jobNumber, 'ACCEPTED');
 
           const buttons = twoButtons(`job:complete:${jobNumber}`, 'Complete Job', ButtonStyle.Success, `job:incomplete:${jobNumber}`, 'Job Incomplete', ButtonStyle.Danger);
+          const embed = jobCard(getJobFull(jobNumber));
+          let customerMessageId = null;
+          let porterMessageId = null;
+
+          try {
+            const customerUser = await client.users.fetch(customer.discord_id);
+            const sent = await customerUser.send({ content: `You accepted **${jobNumber}**.`, embeds: [embed], components: [buttons] });
+            customerMessageId = sent.id;
+          } catch {}
+
           try {
             const porter = getUserById(porterDbId);
-            const porterUser = await client.users.fetch(porter.discord_id);
-            const customerUser = await client.users.fetch(customer.discord_id);
-            const embed = jobCard(getJobFull(jobNumber));
-            await customerUser.send({ content: `You accepted **${jobNumber}**.`, embeds: [embed], components: [buttons] });
-            await porterUser.send({ content: `Customer accepted you for **${jobNumber}**.`, embeds: [embed], components: [buttons] });
+            if (porter) {
+              const porterUser = await client.users.fetch(porter.discord_id);
+              const sent = await porterUser.send({ content: `Customer accepted you for **${jobNumber}**.`, embeds: [embed], components: [buttons] });
+              porterMessageId = sent.id;
+            }
           } catch {}
+
+          setJobCompletionMessages({ jobNumber, customerMessageId, porterMessageId });
           return ix.update({ content: `✅ Accepted for ${jobNumber}.`, components: [] });
         } else {
           setJobStatus(jobNumber, 'OPEN');
@@ -475,15 +489,47 @@ client.on('interactionCreate', async (ix) => {
         if (!actor) return ix.reply({ content: 'Sign up first.', ephemeral: true });
 
         const otherId = (actor.id === job.customer_id) ? job.porter_id : job.customer_id;
-        try {
-          const other = getUserById(otherId);
-          if (other) {
-            const otherUser = await client.users.fetch(other.discord_id);
-            await otherUser.send(`The other party has acted on **${jobNumber}**. ${TICKET_DM}`);
-          }
-        } catch {}
+        const otherMessageId = (actor.id === job.customer_id)
+          ? job.completion_porter_message_id
+          : job.completion_customer_message_id;
 
         await ix.update({ components: [] });
+
+        if (otherId) {
+          try {
+            const other = getUserById(otherId);
+            if (other) {
+              const otherUser = await client.users.fetch(other.discord_id);
+              const dmChannel = await otherUser.createDM();
+              if (otherMessageId) {
+                try {
+                  const msg = await dmChannel.messages.fetch(otherMessageId);
+                  await msg.edit({ components: [] });
+                } catch {}
+              }
+              await dmChannel.send(`The other party has acted on **${jobNumber}**. ${TICKET_DM}`);
+            }
+          } catch {}
+        }
+
+        clearJobCompletionMessages(jobNumber);
+
+        if (action === 'complete') {
+          setJobStatus(jobNumber, 'COMPLETED');
+          const reviewedId = (actor.id === job.customer_id) ? job.porter_id : job.customer_id;
+          if (reviewedId) {
+            const reviewedRole = reviewedId === job.porter_id ? 'PORTER' : 'CUSTOMER';
+            const feedbackRow = new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setCustomId(`feedback:like:${job.id}:${actor.id}:${reviewedId}:${reviewedRole}`)
+                .setStyle(ButtonStyle.Success)
+                .setLabel('👍 Like'),
+              new ButtonBuilder()
+                .setCustomId(`feedback:dislike:${job.id}:${actor.id}:${reviewedId}:${reviewedRole}`)
+                .setStyle(ButtonStyle.Danger)
+                .setLabel('👎 Dislike')
+            );
+
 
         if (action === 'complete') {
           setJobStatus(jobNumber, 'COMPLETED');
