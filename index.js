@@ -10,6 +10,7 @@ import {
   getJobByNumber, assignJob, setJobStatus, getJobFull, addFeedback, refreshUserFeedback,
   getUserById, setJobPorter, incrementCompletedJobs, updateUserType, updateUserBio, deleteUser,
   setJobCompletionMessages, clearJobCompletionMessages
+  getUserById, setJobPorter, incrementCompletedJobs, updateUserType, updateUserBio, deleteUser
 } from './db.js';
 import { rsiBioHasCode } from './rsi.js';
 import { nanoid } from 'nanoid';
@@ -512,6 +513,23 @@ client.on('interactionCreate', async (ix) => {
         }
 
         clearJobCompletionMessages(jobNumber);
+
+        if (action === 'complete') {
+          setJobStatus(jobNumber, 'COMPLETED');
+          const reviewedId = (actor.id === job.customer_id) ? job.porter_id : job.customer_id;
+          if (reviewedId) {
+            const reviewedRole = reviewedId === job.porter_id ? 'PORTER' : 'CUSTOMER';
+            const feedbackRow = new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setCustomId(`feedback:like:${job.id}:${actor.id}:${reviewedId}:${reviewedRole}`)
+                .setStyle(ButtonStyle.Success)
+                .setLabel('👍 Like'),
+              new ButtonBuilder()
+                .setCustomId(`feedback:dislike:${job.id}:${actor.id}:${reviewedId}:${reviewedRole}`)
+                .setStyle(ButtonStyle.Danger)
+                .setLabel('👎 Dislike')
+            );
+
 
         if (action === 'complete') {
           setJobStatus(jobNumber, 'COMPLETED');
