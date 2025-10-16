@@ -529,26 +529,45 @@ async function handleButtonInteraction(ix) {
 
     if (action === 'complete') {
       setJobStatus(jobNumber, 'COMPLETED');
-      const reviewedId = actor.id === job.customer_id ? job.porter_id : job.customer_id;
-      if (reviewedId) {
-        const reviewedRole = reviewedId === job.porter_id ? 'PORTER' : 'CUSTOMER';
-        const feedbackRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`feedback:like:${job.id}:${actor.id}:${reviewedId}:${reviewedRole}`)
-            .setStyle(ButtonStyle.Success)
-            .setLabel('👍 Like'),
-          new ButtonBuilder()
-            .setCustomId(`feedback:dislike:${job.id}:${actor.id}:${reviewedId}:${reviewedRole}`)
-            .setStyle(ButtonStyle.Danger)
-            .setLabel('👎 Dislike')
-        );
 
+      const reviewerId = job.customer_id;
+      const reviewedId = job.porter_id;
+      const canCollectFeedback = reviewerId && reviewedId;
+      const feedbackRow = canCollectFeedback
+        ? new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`feedback:like:${job.id}:${reviewerId}:${reviewedId}:PORTER`)
+              .setStyle(ButtonStyle.Success)
+              .setLabel('👍 Like'),
+            new ButtonBuilder()
+              .setCustomId(`feedback:dislike:${job.id}:${reviewerId}:${reviewedId}:PORTER`)
+              .setStyle(ButtonStyle.Danger)
+              .setLabel('👎 Dislike')
+          )
+        : null;
+
+      const feedbackPrompt = `✅ Marked **${jobNumber}** as complete. Share how it went with a Like or Dislike (dislikes stay private).`;
+
+      if (actor.id === reviewerId) {
         await ix.followUp({
-          content: `✅ Marked **${jobNumber}** as complete. Share how it went with a Like or Dislike (dislikes stay private).`,
-          components: [feedbackRow]
+          content: canCollectFeedback ? feedbackPrompt : `✅ Marked **${jobNumber}** as complete.`,
+          components: feedbackRow ? [feedbackRow] : []
         });
       } else {
         await ix.followUp({ content: `✅ Marked **${jobNumber}** as complete.` });
+
+        if (feedbackRow) {
+          try {
+            const customer = getUserById(reviewerId);
+            if (customer) {
+              const customerUser = await client.users.fetch(customer.discord_id);
+              await customerUser.send({
+                content: feedbackPrompt,
+                components: [feedbackRow]
+              });
+            }
+          } catch {}
+        }
       }
     } else {
       setJobStatus(jobNumber, 'DISPUTED');
